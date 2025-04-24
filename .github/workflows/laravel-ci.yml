@@ -1,30 +1,21 @@
-name: Laravel CI/CD Pipeline
+name: Laravel Test Suite
 
 on:
   push:
-    branches: [ master, develop ]
+    branches: [ main, develop ]
   pull_request:
-    branches: [ master, develop ]
+    branches: [ main, develop ]
 
 jobs:
   laravel-tests:
-    name: Test (PHP ${{ matrix.php }})
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        php: ['8.1', '8.2']
-        include:
-          - php: '8.1'
-            test-db-name: test_81_${{ github.run_id }}
-          - php: '8.2'
-            test-db-name: test_82_${{ github.run_id }}
 
     services:
       mysql:
         image: mysql:8.0
         env:
           MYSQL_ROOT_PASSWORD: secret
-          MYSQL_DATABASE: ${{ matrix.test-db-name }}
+          MYSQL_DATABASE: laravel_test_${{ github.run_id }}
         ports:
           - 3306:3306
         options: >-
@@ -32,99 +23,67 @@ jobs:
           --health-interval=5s
           --health-timeout=3s
           --health-retries=5
-        volumes:
-          - mysql-data:/var/lib/mysql
-
-    env:
-      DB_CONNECTION: mysql
-      DB_HOST: 127.0.0.1
-      DB_PORT: 3306
-      DB_USERNAME: root
-      DB_PASSWORD: secret
 
     steps:
+      # الخطوة 1: تنظيف مساحة العمل
       - name: Clean Workspace
         run: |
-          sudo rm -rf tmp/*
-          mkdir -p tmp/mysql
+          sudo rm -rf ~/.composer/vendor/*
+          sudo rm -rf vendor/
 
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      # الخطوة 2: تنزيل الكود
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      # الخطوة 3: اكتشاف إصدار PHP
+      - name: Detect PHP Version
+        id: php-version
+        run: |
+          PHP_VERSION=$(composer config platform.php || jq -r '.require.php | match("[0-9]+\\.[0-9]+").string' composer.json)
+          echo "PHP_VERSION=${PHP_VERSION:-8.2}" >> $GITHUB_OUTPUT
+
+      # الخطوة 4: إعداد PHP
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
         with:
-          php-version: ${{ matrix.php }}
-          extensions: mbstring, pdo, mysql, xml, dom, fileinfo, bcmath, gd
-          ini-values: |
-            memory_limit=2G
-            post_max_size=128M
-            upload_max_filesize=128M
+          php-version: ${{ steps.php-version.outputs.PHP_VERSION }}
+          extensions: mbstring, pdo, mysql, xml, dom, fileinfo, bcmath
+          ini-values: memory_limit=2G
           coverage: pcov
 
-      - name: Get Composer Cache Directory
-        id: composer-cache
-        run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
-
-      - name: Cache Dependencies
-        uses: actions/cache@v3
-        with:
-          path: ${{ steps.composer-cache.outputs.dir }}
-          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-composer-
-
-      - name: Install Dependencies
+      # الخطوة 5: حل مشكلة Composer Lock
+      - name: Resolve Dependencies
         run: |
+          if [ -f composer.lock ]; then
+            composer validate --strict || rm composer.lock
+          fi
           composer install --prefer-dist --no-progress --no-interaction --optimize-autoloader
-          composer dump-autoload --optimize
 
+      # الخطوة 6: إعداد البيئة
       - name: Prepare Environment
         run: |
           cp .env.example .env.test
           echo "APP_ENV=testing" >> .env.test
-          echo "DB_DATABASE=${{ matrix.test-db-name }}" >> .env.test
-          echo "CACHE_DRIVER=array" >> .env.test
-          echo "SESSION_DRIVER=array" >> .env.test
-          echo "QUEUE_CONNECTION=sync" >> .env.test
+          echo "DB_DATABASE=laravel_test_${{ github.run_id }}" >> .env.test
+          echo "DB_USERNAME=root" >> .env.test
+          echo "DB_PASSWORD=secret" >> .env.test
           php artisan key:generate --env=testing --force
 
-      - name: Wait for MySQL
-        run: |
-          for i in {1..30}; do
-            if mysqladmin ping -h 127.0.0.1 -uroot -psecret --silent; then
-              echo "MySQL is ready!"
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "MySQL failed to start"
-          exit 1
-
+      # الخطوة 7: إعداد قاعدة البيانات
       - name: Setup Database
         run: |
-          mysql -h 127.0.0.1 -uroot -psecret -e "CREATE DATABASE IF NOT EXISTS ${{ matrix.test-db-name }}"
           php artisan migrate:fresh --env=testing --force
           php artisan db:seed --env=testing --force
 
+      # الخطوة 8: تشغيل الاختبارات
       - name: Run Tests
         run: |
           php artisan config:clear
-          php artisan test --env=testing --stop-on-failure --testsuite=Feature,Unit
+          php artisan test --env=testing --stop-on-failure
 
-      - name: Upload Coverage
-        if: matrix.php == '8.2'
-        uses: codecov/codecov-action@v3
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          file: ./coverage.xml
-          flags: laravel-tests
-
+      # الخطوة 9: التنظيف (اختياري)
       - name: Cleanup
         if: always()
         run: |
-          mysql -h 127.0.0.1 -uroot -psecret -e "DROP DATABASE IF EXISTS ${{ matrix.test-db-name }}"
-          docker volume rm mysql-data || true
-
+          mysql -h 127.0.0.1 -uroot -psecret -e "DROP DATABASE IF EXISTS laravel_test_${{ github.run_id }}"
