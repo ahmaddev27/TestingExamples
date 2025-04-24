@@ -1,60 +1,74 @@
-name: Laravel CI
+name: Laravel CI/CD Pipeline
 
 on:
   push:
-    branches: [ master, develop ]
+    branches: [ main, develop ]
   pull_request:
-    branches: [ master, develop ]
+    branches: [ main, develop ]
 
 jobs:
   laravel-tests:
-    name: Run Tests (PHP ${{ matrix.php }})
+    name: Test (PHP ${{ matrix.php }})
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        php: [ '8.1', '8.2' ]
+        php: ['8.1', '8.2']
         include:
           - php: '8.1'
-            laravel: ^9.0
+            test-db-name: test_81_${{ github.run_id }}
           - php: '8.2'
-            laravel: ^10.0
+            test-db-name: test_82_${{ github.run_id }}
 
     services:
       mysql:
         image: mysql:8.0
         env:
-          MYSQL_DATABASE: test_db_${{ github.run_id }}
           MYSQL_ROOT_PASSWORD: secret
-          MYSQL_ALLOW_EMPTY_PASSWORD: 'no'
+          MYSQL_DATABASE: ${{ matrix.test-db-name }}
         ports:
           - 3306:3306
         options: >-
           --health-cmd="mysqladmin ping -psecret"
-          --health-interval=10s
-          --health-timeout=5s
+          --health-interval=5s
+          --health-timeout=3s
           --health-retries=5
         volumes:
-          - ./tmp/mysql:/var/lib/mysql
+          - mysql-data:/var/lib/mysql
+
+    env:
+      DB_CONNECTION: mysql
+      DB_HOST: 127.0.0.1
+      DB_PORT: 3306
+      DB_USERNAME: root
+      DB_PASSWORD: secret
 
     steps:
-      - name: Checkout code
+      - name: Clean Workspace
+        run: |
+          sudo rm -rf tmp/*
+          mkdir -p tmp/mysql
+
+      - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php }}
-          extensions: mbstring, pdo, mysql, xml, dom, fileinfo
-          ini-values: memory_limit=2G
+          extensions: mbstring, pdo, mysql, xml, dom, fileinfo, bcmath, gd
+          ini-values: |
+            memory_limit=2G
+            post_max_size=128M
+            upload_max_filesize=128M
           coverage: pcov
-          tools: composer:v2
 
       - name: Get Composer Cache Directory
         id: composer-cache
-        run: |
-          echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
+        run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
 
-      - name: Cache dependencies
+      - name: Cache Dependencies
         uses: actions/cache@v3
         with:
           path: ${{ steps.composer-cache.outputs.dir }}
@@ -62,52 +76,55 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-composer-
 
-      - name: Install dependencies
+      - name: Install Dependencies
         run: |
           composer install --prefer-dist --no-progress --no-interaction --optimize-autoloader
-          composer dump-autoload
+          composer dump-autoload --optimize
 
-      - name: Prepare environment
+      - name: Prepare Environment
         run: |
           cp .env.example .env.test
           echo "APP_ENV=testing" >> .env.test
-          echo "DB_CONNECTION=mysql" >> .env.test
-          echo "DB_HOST=127.0.0.1" >> .env.test
-          echo "DB_PORT=3306" >> .env.test
-          echo "DB_DATABASE=test_db_${{ github.run_id }}" >> .env.test
-          echo "DB_USERNAME=root" >> .env.test
-          echo "DB_PASSWORD=secret" >> .env.test
+          echo "DB_DATABASE=${{ matrix.test-db-name }}" >> .env.test
           echo "CACHE_DRIVER=array" >> .env.test
           echo "SESSION_DRIVER=array" >> .env.test
           echo "QUEUE_CONNECTION=sync" >> .env.test
-          php artisan key:generate --env=testing
+          php artisan key:generate --env=testing --force
 
-      - name: Database setup
+      - name: Wait for MySQL
         run: |
-          mysql --host=127.0.0.1 --user=root --password=secret -e "CREATE DATABASE IF NOT EXISTS test_db_${{ github.run_id }}"
+          for i in {1..30}; do
+            if mysqladmin ping -h 127.0.0.1 -uroot -psecret --silent; then
+              echo "MySQL is ready!"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "MySQL failed to start"
+          exit 1
+
+      - name: Setup Database
+        run: |
+          mysql -h 127.0.0.1 -uroot -psecret -e "CREATE DATABASE IF NOT EXISTS ${{ matrix.test-db-name }}"
           php artisan migrate:fresh --env=testing --force
           php artisan db:seed --env=testing --force
 
-      - name: Run tests
-        env:
-          DB_DATABASE: test_db_${{ github.run_id }}
-          DB_USERNAME: root
-          DB_PASSWORD: secret
+      - name: Run Tests
         run: |
           php artisan config:clear
-          php artisan test --env=testing --stop-on-failure
+          php artisan test --env=testing --stop-on-failure --testsuite=Feature,Unit
 
-      - name: Upload coverage
-        if: matrix.php == '8.2' # Upload only once
+      - name: Upload Coverage
+        if: matrix.php == '8.2'
         uses: codecov/codecov-action@v3
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           file: ./coverage.xml
-          flags: unittests
-          name: codecov-umbrella
-          fail_ci_if_error: false
+          flags: laravel-tests
 
       - name: Cleanup
         if: always()
         run: |
-          mysql --host=127.0.0.1 --user=root --password=secret -e "DROP DATABASE test_db_${{ github.run_id }}"
+          mysql -h 127.0.0.1 -uroot -psecret -e "DROP DATABASE IF EXISTS ${{ matrix.test-db-name }}"
+          docker volume rm mysql-data || true
+
