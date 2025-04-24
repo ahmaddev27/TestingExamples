@@ -1,0 +1,113 @@
+name: Laravel CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  laravel-tests:
+    name: Run Tests (PHP ${{ matrix.php }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        php: [ '8.1', '8.2' ]
+        include:
+          - php: '8.1'
+            laravel: ^9.0
+          - php: '8.2'
+            laravel: ^10.0
+
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_DATABASE: test_db_${{ github.run_id }}
+          MYSQL_ROOT_PASSWORD: secret
+          MYSQL_ALLOW_EMPTY_PASSWORD: 'no'
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -psecret"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+        volumes:
+          - ./tmp/mysql:/var/lib/mysql
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: mbstring, pdo, mysql, xml, dom, fileinfo
+          ini-values: memory_limit=2G
+          coverage: pcov
+          tools: composer:v2
+
+      - name: Get Composer Cache Directory
+        id: composer-cache
+        run: |
+          echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
+
+      - name: Cache dependencies
+        uses: actions/cache@v3
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-composer-
+
+      - name: Install dependencies
+        run: |
+          composer install --prefer-dist --no-progress --no-interaction --optimize-autoloader
+          composer dump-autoload
+
+      - name: Prepare environment
+        run: |
+          cp .env.example .env.test
+          echo "APP_ENV=testing" >> .env.test
+          echo "DB_CONNECTION=mysql" >> .env.test
+          echo "DB_HOST=127.0.0.1" >> .env.test
+          echo "DB_PORT=3306" >> .env.test
+          echo "DB_DATABASE=test_db_${{ github.run_id }}" >> .env.test
+          echo "DB_USERNAME=root" >> .env.test
+          echo "DB_PASSWORD=secret" >> .env.test
+          echo "CACHE_DRIVER=array" >> .env.test
+          echo "SESSION_DRIVER=array" >> .env.test
+          echo "QUEUE_CONNECTION=sync" >> .env.test
+          php artisan key:generate --env=testing
+
+      - name: Database setup
+        run: |
+          mysql --host=127.0.0.1 --user=root --password=secret -e "CREATE DATABASE IF NOT EXISTS test_db_${{ github.run_id }}"
+          php artisan migrate:fresh --env=testing --force
+          php artisan db:seed --env=testing --force
+
+      - name: Run tests
+        env:
+          DB_DATABASE: test_db_${{ github.run_id }}
+          DB_USERNAME: root
+          DB_PASSWORD: secret
+        run: |
+          php artisan config:clear
+          php artisan test --env=testing --stop-on-failure
+
+      - name: Upload coverage
+        if: matrix.php == '8.2' # Upload only once
+        uses: codecov/codecov-action@v3
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          file: ./coverage.xml
+          flags: unittests
+          name: codecov-umbrella
+          fail_ci_if_error: false
+
+      - name: Cleanup
+        if: always()
+        run: |
+          mysql --host=127.0.0.1 --user=root --password=secret -e "DROP DATABASE test_db_${{ github.run_id }}"
