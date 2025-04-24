@@ -1,10 +1,6 @@
-name: Laravel Test Suite
+name: Run Laravel Tests
 
-on:
-  push:
-    branches: [ master, develop ]
-  pull_request:
-    branches: [ master, develop ]
+on: [push, pull_request]
 
 jobs:
   laravel-tests:
@@ -14,76 +10,37 @@ jobs:
       mysql:
         image: mysql:8.0
         env:
-          MYSQL_ROOT_PASSWORD: secret
-          MYSQL_DATABASE: laravel_test_${{ github.run_id }}
+          MYSQL_DATABASE: myapp_testing
+          MYSQL_ROOT_PASSWORD: root
         ports:
           - 3306:3306
         options: >-
-          --health-cmd="mysqladmin ping -psecret"
-          --health-interval=5s
-          --health-timeout=3s
-          --health-retries=5
+          --health-cmd="mysqladmin ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=3
 
     steps:
-      # الخطوة 1: تنظيف مساحة العمل
-      - name: Clean Workspace
-        run: |
-          sudo rm -rf ~/.composer/vendor/*
-          sudo rm -rf vendor/
+      - uses: actions/checkout@v3
 
-      # الخطوة 2: تنزيل الكود
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      # الخطوة 3: اكتشاف إصدار PHP
-      - name: Detect PHP Version
-        id: php-version
-        run: |
-          PHP_VERSION=$(composer config platform.php || jq -r '.require.php | match("[0-9]+\\.[0-9]+").string' composer.json)
-          echo "PHP_VERSION=${PHP_VERSION:-8.2}" >> $GITHUB_OUTPUT
-
-      # الخطوة 4: إعداد PHP
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
         with:
-          php-version: ${{ steps.php-version.outputs.PHP_VERSION }}
-          extensions: mbstring, pdo, mysql, xml, dom, fileinfo, bcmath
-          ini-values: memory_limit=2G
-          coverage: pcov
+          php-version: '8.2'
+          extensions: mbstring, pdo, mysql
+          coverage: none
 
-      # الخطوة 5: حل مشكلة Composer Lock
-      - name: Resolve Dependencies
-        run: |
-          if [ -f composer.lock ]; then
-            composer validate --strict || rm composer.lock
-          fi
-          composer install --prefer-dist --no-progress --no-interaction --optimize-autoloader
+      - name: Install Dependencies
+        run: composer install --prefer-dist --no-progress
 
-      # الخطوة 6: إعداد البيئة
-      - name: Prepare Environment
-        run: |
-          cp .env.example .env.test
-          echo "APP_ENV=testing" >> .env.test
-          echo "DB_DATABASE=laravel_test_${{ github.run_id }}" >> .env.test
-          echo "DB_USERNAME=root" >> .env.test
-          echo "DB_PASSWORD=secret" >> .env.test
-          php artisan key:generate --env=testing --force
+      - name: Copy .env.testing
+        run: cp .env.testing .env
 
-      # الخطوة 7: إعداد قاعدة البيانات
-      - name: Setup Database
-        run: |
-          php artisan migrate:fresh --env=testing --force
-          php artisan db:seed --env=testing --force
+      - name: Generate App Key
+        run: php artisan key:generate
 
-      # الخطوة 8: تشغيل الاختبارات
+      - name: Run Migrations
+        run: php artisan migrate --force
+
       - name: Run Tests
-        run: |
-          php artisan config:clear
-          php artisan test --env=testing --stop-on-failure
-
-      # الخطوة 9: التنظيف (اختياري)
-      - name: Cleanup
-        if: always()
-        run: |
-          mysql -h 127.0.0.1 -uroot -psecret -e "DROP DATABASE IF EXISTS laravel_test_${{ github.run_id }}"
+        run: php artisan test
