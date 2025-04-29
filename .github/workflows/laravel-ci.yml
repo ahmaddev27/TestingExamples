@@ -1,4 +1,4 @@
-name: Run Laravel Tests
+name: Run Laravel Tests and Deploy
 
 on: [push, pull_request]
 
@@ -10,7 +10,7 @@ jobs:
       mysql:
         image: mysql:8.0
         env:
-          MYSQL_DATABASE: myapp_testing
+          MYSQL_DATABASE: myapp_testing # قاعدة بيانات منفصلة للتستات
           MYSQL_ROOT_PASSWORD: root
         ports:
           - 3306:3306
@@ -21,26 +21,55 @@ jobs:
           --health-retries=3
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v3 # تنزيل الكود من الريبو
 
       - name: Setup PHP
         uses: shivammathur/setup-php@v2
         with:
           php-version: '8.2'
-          extensions: mbstring, pdo, mysql
+          extensions: mbstring, pdo, mysql # إضافة اكستنشنات ضرورية للارافيل
           coverage: none
 
       - name: Install Dependencies
-        run: composer install --prefer-dist --no-progress
+        run: composer install --prefer-dist --no-progress # تنصيب الباقات
 
-      - name: Copy .env.testing
-        run: cp .env.testing .env
-
-      - name: Generate App Key
-        run: php artisan key:generate
+      - name: Prepare Environment
+        run: |
+          cp .env.testing .env # نسخ ملف البيئة الخاص بالتستات
+          php artisan key:generate # إنشاء مفتاح التطبيق
 
       - name: Run Migrations
-        run: php artisan migrate --force
+        run: php artisan migrate --force # تنفيذ الميجراشنز
 
       - name: Run Tests
-        run: php artisan test
+        run: php artisan test # تشغيل التستات
+
+  deploy-to-server:
+    needs: laravel-tests # لن يعمل إلا إذا نجح job التستات
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' # النشر فقط عند البوش على فرع main
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Deploy to Server
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ secrets.SERVER_HOST }} # بيانات السيرفر من Secrets
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          source: "./"
+          target: "/var/www/myapp"
+
+      - name: Run Server Commands
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          script: |
+            cd /var/www/myapp
+            composer install --no-dev
+            php artisan migrate --force
+            php artisan optimize:clear
